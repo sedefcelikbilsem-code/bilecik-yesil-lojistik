@@ -23,30 +23,31 @@ try:
     mahalleler = sorted(data[mahalle_sutunu].unique())
     secilen_mahalle = st.sidebar.selectbox("Analiz Edilecek Mahalle", mahalleler)
     
+    # --- YENİ EKLENEN KISIM: Eğim Bilgisi ---
+    mahalle_bilgisi = data[data[mahalle_sutunu] == secilen_mahalle].iloc[0]
+    egim_sutunu = 'yol_egimi' if 'yol_egimi' in data.columns else 'egim'
+    mahalle_egimi = mahalle_bilgisi.get(egim_sutunu, 0.5)
+    
+    # Eğim değerini sol tarafta gösteriyoruz
+    st.sidebar.info(f"📍 Seçilen Mahalle Eğimi: %{round(mahalle_egimi * 100, 1)}")
+    # ---------------------------------------
+    
     yuk = st.sidebar.slider("Yük Miktarı (Ton)", 0.0, 30.0, 5.0)
     mesafe = st.sidebar.number_input("Mesafe (km)", value=5.0)
 
     if st.button("Emisyon Analizini Çalıştır"):
-        mahalle_bilgisi = data[data[mahalle_sutunu] == secilen_mahalle].iloc[0]
-        egim = mahalle_bilgisi.get('yol_egimi', 0.5)
-        
-        # MODELİN BEKLEDİĞİ 17 SÜTUNU OLUŞTURUYORUZ
-        # [mesafe, agir_arac, arac_tipi, egim_x_yuk, yuk, trafik, + 11 Mahalle Sütunu]
-        temel_ozellikler = [mesafe, 0, 1, egim * yuk, yuk, 0.5]
-        
-        # Mahalleleri alfabetik sıraya göre 0 veya 1 yapıyoruz (One-Hot Encoding simülasyonu)
+        # 17 Feature Fix
+        temel_ozellikler = [mesafe, 0, 1, mahalle_egimi * yuk, yuk, 0.5]
         mahalle_ozellikleri = [1 if m == secilen_mahalle else 0 for m in mahalleler]
-        
-        # Toplam özellik sayısını 17'ye tamamlıyoruz (Eksik mahalle varsa 0 ekle)
-        girdi_listesi = temel_ozellikler + mahalle_ozellikleri
-        girdi_listesi = girdi_listesi[:17] # Tam 17 tane olduğundan emin ol
+        girdi_listesi = (temel_ozellikler + mahalle_ozellikleri)[:17]
         
         girdi = np.array([girdi_listesi])
         tahmin = model.predict(girdi)[0]
         
         st.divider()
+        st.balloons()
         st.metric("Tahmini Karbon Salınımı", f"{round(tahmin, 2)} kg CO2")
-        st.success(f"📍 {secilen_mahalle} mahallesi için 17 parametreli analiz tamamlandı.")
+        st.success(f"📍 {secilen_mahalle} mahallesi analizi tamamlandı.")
 
 except Exception as e:
     st.error(f"Sistem Hatası: {e}")
