@@ -28,7 +28,6 @@ yuk = st.sidebar.slider("Yük Miktarı (Ton)", 0.0, 30.0, 5.0)
 arac_map = {"Hafif Kamyonet": 1, "Orta Kamyon": 2, "Ağır TIR": 3}
 
 col1, col2 = st.columns(2)
-
 with col1:
     st.subheader("📍 Rota Belirleme")
     baslangic = st.selectbox("Başlangıç Noktası", mahalle_df['mahalle'].unique())
@@ -36,13 +35,34 @@ with col1:
     mesafe    = st.number_input("Tahmini Mesafe (km)", min_value=0.1, value=5.0)
 
 def hesapla_co2(mesafe_km, arac_tipi_str, yuk_ton, mahalle_bilgisi):
+    # Modelin beklediği 17 özellik (sıra önemli):
+    # yol_egimi, trafik_yogunlugu, yuk_durumu, mesafe_km, arac_tipi,
+    # arac_yasi, hiz_kmh, karbon_katsayi, ticaret_yogunlugu, ulasim_skoru,
+    # yesil_alan_skoru, egim_x_yuk, trafik_x_hiz, hiz_sapma_optimal,
+    # agir_arac, mahalle_trafik, sehir_ici
+
+    yol_egimi        = mahalle_bilgisi['karbon_katsayi']
+    trafik_yogunlugu = mahalle_bilgisi.get('ticaret_yogunlugu', 0.5)
+    yuk_durumu       = min(yuk_ton / 30.0, 1.0)
+    arac_tipi        = arac_map[arac_tipi_str]
+    arac_yasi        = 5       # varsayılan ortalama
+    hiz_kmh          = 60      # şehir içi ortalama
+    karbon_katsayi   = mahalle_bilgisi['karbon_katsayi']
+    ticaret_yogunlugu= mahalle_bilgisi.get('ticaret_yogunlugu', 0.5)
+    ulasim_skoru     = mahalle_bilgisi.get('ulasim_skoru', 0.5)
+    yesil_alan_skoru = mahalle_bilgisi.get('yesil_alan_skoru', 0.5)
+    egim_x_yuk       = yol_egimi * yuk_ton
+    trafik_x_hiz     = trafik_yogunlugu * hiz_kmh
+    hiz_sapma_optimal= abs(hiz_kmh - 80)
+    agir_arac        = 1 if arac_tipi_str == "Ağır TIR" else 0
+    mahalle_trafik   = yol_egimi * trafik_yogunlugu
+    sehir_ici        = 1
+
     girdi = np.array([[
-        mesafe_km,
-        1 if arac_tipi_str == "Ağır TIR" else 0,
-        arac_map[arac_tipi_str],
-        mahalle_bilgisi['karbon_katsayi'],
-        yuk_ton,
-        0.5
+        yol_egimi, trafik_yogunlugu, yuk_durumu, mesafe_km, arac_tipi,
+        arac_yasi, hiz_kmh, karbon_katsayi, ticaret_yogunlugu, ulasim_skoru,
+        yesil_alan_skoru, egim_x_yuk, trafik_x_hiz, hiz_sapma_optimal,
+        agir_arac, mahalle_trafik, sehir_ici
     ]])
     return model.predict(girdi)[0]
 
@@ -109,7 +129,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
             rota_co2_listesi.append((rota, km, co2))
 
         rota_co2_listesi.sort(key=lambda x: x[2])
-
         min_co2 = rota_co2_listesi[0][2]
         max_co2 = rota_co2_listesi[-1][2]
 
@@ -117,7 +136,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
             koordinatlar = [(p[1], p[0]) for p in rota['geometry']['coordinates']]
             renk  = co2_rengi(co2, min_co2, max_co2)
             kalin = 7 if sira == 0 else 4
-
             popup_html = f"""
             <div style="font-family:sans-serif;min-width:160px">
                 <b>{ROTA_ETIKETLERI[min(sira,2)]}</b><br>
@@ -125,7 +143,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
                 💨 CO₂: <b>{co2:.2f} kg</b><br>
                 {"⭐ <b>Önerilen rota</b>" if sira == 0 else ""}
             </div>"""
-
             folium.PolyLine(
                 koordinatlar, color=renk, weight=kalin, opacity=0.85,
                 tooltip=f"Rota {sira+1}: {co2:.1f} kg CO₂",
@@ -137,7 +154,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
             tooltip=f"🟢 Başlangıç: {baslangic}",
             icon=folium.Icon(color='green', icon='play', prefix='fa')
         ).add_to(harita)
-
         folium.Marker(
             [varis_bilgisi['lat'], varis_bilgisi['lon']],
             tooltip=f"🔴 Varış: {varis}",
@@ -173,8 +189,8 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
 
     except openrouteservice.exceptions.ApiError as hata:
         st.error(f"ORS API hatası: {hata}")
-    except KeyError:
-        st.warning("CSV'de 'lat' ve 'lon' sütunları bulunamadı.")
+    except KeyError as e:
+        st.warning(f"CSV'de eksik sütun: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.write("Bilecik BİLSEM - 2026")
