@@ -6,25 +6,13 @@ import folium
 from streamlit_folium import st_folium
 import openrouteservice
 
-# ─────────────────────────────────────────────
-# 1. Sayfa Yapılandırması
-# ─────────────────────────────────────────────
 st.set_page_config(page_title="Bilecik Yeşil Lojistik", layout="wide")
 st.title("🍀 Toyota Teknik Projeler: Yeşil Rota Karar Destek Sistemi")
 st.markdown("---")
 
-# ─────────────────────────────────────────────
-# 2. ORS API İstemcisi
-#    Streamlit Cloud'da: Settings → Secrets'a ekleyin:
-#    [ors]
-#    api_key = "BURAYA_ANAHTARINIZI_YAZIN"
-# ─────────────────────────────────────────────
 ORS_API_KEY = st.secrets["ors"]["api_key"]
 ors_client = openrouteservice.Client(key=ORS_API_KEY)
 
-# ─────────────────────────────────────────────
-# 3. Model ve Verilerin Yüklenmesi
-# ─────────────────────────────────────────────
 @st.cache_resource
 def load_assets():
     model = joblib.load('bilecik_emisyon_model.pkl')
@@ -33,18 +21,12 @@ def load_assets():
 
 model, mahalle_df = load_assets()
 
-# ─────────────────────────────────────────────
-# 4. Yan Menü
-# ─────────────────────────────────────────────
 st.sidebar.header("🚚 Taşıma Parametreleri")
 arac_secimi = st.sidebar.selectbox("Araç Tipi", ["Hafif Kamyonet", "Orta Kamyon", "Ağır TIR"])
 yuk = st.sidebar.slider("Yük Miktarı (Ton)", 0.0, 30.0, 5.0)
 
 arac_map = {"Hafif Kamyonet": 1, "Orta Kamyon": 2, "Ağır TIR": 3}
 
-# ─────────────────────────────────────────────
-# 5. Ana Panel — Rota Seçimi
-# ─────────────────────────────────────────────
 col1, col2 = st.columns(2)
 
 with col1:
@@ -53,23 +35,17 @@ with col1:
     varis     = st.selectbox("Varış Noktası",     mahalle_df['mahalle'].unique())
     mesafe    = st.number_input("Tahmini Mesafe (km)", min_value=0.1, value=5.0)
 
-# ─────────────────────────────────────────────
-# 6. Emisyon Hesaplama Yardımcı Fonksiyonu
-# ─────────────────────────────────────────────
 def hesapla_co2(mesafe_km, arac_tipi_str, yuk_ton, mahalle_bilgisi):
     girdi = np.array([[
         mesafe_km,
         1 if arac_tipi_str == "Ağır TIR" else 0,
         arac_map[arac_tipi_str],
-        mahalle_bilgisi['yol_egimi'],
+        mahalle_bilgisi['karbon_katsayi'],
         yuk_ton,
         0.5
     ]])
     return model.predict(girdi)[0]
 
-# ─────────────────────────────────────────────
-# 7. Harita Renk Yardımcısı
-# ─────────────────────────────────────────────
 ROTA_ETIKETLERI = ["En Az Emisyon 🌿", "Orta Emisyon 🟡", "En Fazla Emisyon 🔴"]
 
 def co2_rengi(co2_degeri, min_co2, max_co2):
@@ -82,9 +58,6 @@ def co2_rengi(co2_degeri, min_co2, max_co2):
         return "orange"
     return "red"
 
-# ─────────────────────────────────────────────
-# 8. Ana Buton — Analiz + Harita
-# ─────────────────────────────────────────────
 if st.button("🚀 Emisyon Analizini Çalıştır"):
 
     mahalle_bilgisi = mahalle_df[mahalle_df['mahalle'] == baslangic].iloc[0]
@@ -92,13 +65,12 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
 
     st.markdown("---")
 
-    # ── Mevcut hesaplama (değişmedi) ──────────
     tahmin = hesapla_co2(mesafe, arac_secimi, yuk, mahalle_bilgisi)
 
     res1, res2 = st.columns(2)
     with res1:
         st.metric(label="Tahmini Karbon Salınımı", value=f"{round(tahmin, 2)} kg CO2")
-        st.info(f"Seçilen Mahalle: {baslangic} | Eğim Zorluğu: {mahalle_bilgisi['yol_egimi']}")
+        st.info(f"Seçilen Mahalle: {baslangic} | Karbon Katsayısı: {mahalle_bilgisi['karbon_katsayi']}")
     with res2:
         st.write("📊 Rota Verimlilik Analizi")
         chart_data = pd.DataFrame({
@@ -107,7 +79,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
         })
         st.bar_chart(chart_data, x='Senaryo', y='Emisyon', color='#2ecc71')
 
-    # ── YENİ: Harita ve Alternatif Rotalar ────
     st.markdown("---")
     st.subheader("🗺️ Yeşil Rota Haritası")
     st.caption("Alternatif rotalar emisyon değerine göre: 🟢 Az · 🟡 Orta · 🔴 Fazla")
@@ -175,7 +146,6 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
 
         st_folium(harita, width=None, height=500, returned_objects=[])
 
-        # ── Özet Tablo ────────────────────────
         st.subheader("📋 Rota Karşılaştırması")
         tablo_verisi = []
         for sira, (rota, km, co2) in enumerate(rota_co2_listesi):
@@ -204,8 +174,7 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
     except openrouteservice.exceptions.ApiError as hata:
         st.error(f"ORS API hatası: {hata}")
     except KeyError:
-        st.warning("CSV'de 'lat' ve 'lon' sütunları bulunamadı. Adım 4'e bakın.")
+        st.warning("CSV'de 'lat' ve 'lon' sütunları bulunamadı.")
 
-# ─────────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.write("Bilecik BİLSEM - 2026")
