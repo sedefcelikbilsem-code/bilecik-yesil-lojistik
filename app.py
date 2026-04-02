@@ -2,54 +2,210 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
+import folium
+from streamlit_folium import st_folium
+import openrouteservice
 
-st.set_page_config(page_title="Bilecik Yeşil Rota", page_icon="🍀")
-st.title("🍀 Toyota Teknik Projeler: Yeşil Lojistik")
-st.subheader("Bilecik Mahalle Bazlı Karbon Tahminleme")
+# ─────────────────────────────────────────────
+# 1. Sayfa Yapılandırması
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Bilecik Yeşil Lojistik", layout="wide")
+st.title("🍀 Toyota Teknik Projeler: Yeşil Rota Karar Destek Sistemi")
+st.markdown("---")
 
+# ─────────────────────────────────────────────
+# 2. ORS API İstemcisi
+#    Streamlit Cloud'da: Settings → Secrets'a ekleyin:
+#    [ors]
+#    api_key = "BURAYA_ANAHTARINIZI_YAZIN"
+# ─────────────────────────────────────────────
+ORS_API_KEY = st.secrets["ors"]["api_key"]
+ors_client = openrouteservice.Client(key=ORS_API_KEY)
+
+# ─────────────────────────────────────────────
+# 3. Model ve Verilerin Yüklenmesi
+# ─────────────────────────────────────────────
 @st.cache_resource
 def load_assets():
     model = joblib.load('bilecik_emisyon_model.pkl')
-    if isinstance(model, tuple): model = model[0]
     data = pd.read_csv('bilecik_mahalle_verileri.csv')
-    data.columns = data.columns.str.strip().str.lower()
     return model, data
 
-try:
-    model, data = load_assets()
-    mah_col = data.columns[0]
-    
-    st.sidebar.header("🚚 Taşıma Parametreleri")
-    mahalleler = sorted(data[mah_col].unique())
-    secilen_mahalle = st.sidebar.selectbox("Analiz Edilecek Mahalle", mahalleler)
-    
-    # --- KRİTİK DEĞİŞİKLİK: KATSAYIYI OKU ---
-    mahalle_verisi = data[data[mah_col] == secilen_mahalle].iloc[0]
-    # Senin tablondaki 'karbon_katsayi' sütununu çekiyoruz
-    katsayi = float(mahalle_verisi.get('karbon_katsayi', 1.0))
-    
-    # Ekranda "Lojistik Zorluk Katsayısı" olarak gösterelim (Jüri buna bayılır)
-    st.sidebar.metric("Mahalle Zorluk Katsayısı", f"x{katsayi}")
-    # ---------------------------------------
-    
-    yuk = st.sidebar.slider("Yük Miktarı (Ton)", 0.0, 30.0, 10.0)
-    mesafe = st.sidebar.number_input("Mesafe (km)", value=5.0)
+model, mahalle_df = load_assets()
 
-    if st.button("Emisyon Analizini Çalıştır"):
-        # Modelin beklediği 17 sütunu doldur (Katsayıyı eğim yerine kullanıyoruz)
-        temel_ozellikler = [mesafe, 0, 1, katsayi * yuk, yuk, 0.5]
-        mahalle_ozellikleri = [1 if m == secilen_mahalle else 0 for m in mahalleler]
-        girdi = (temel_ozellikler + mahalle_ozellikleri)[:17]
-        
-        tahmin = model.predict(np.array([girdi]))[0]
-        
-        st.divider()
-        st.balloons()
-        st.header(f"📊 Tahmini Salınım: {round(tahmin, 2)} kg CO2")
-        
-        # Karşılaştırma Grafiği
-        st.bar_chart(pd.DataFrame({'CO2 (kg)': [tahmin, tahmin*0.82]}, index=['Standart', 'Yeşil']))
-        st.success(f"📍 {secilen_mahalle} mahallesi katsayı analiziyle hesaplandı.")
+# ─────────────────────────────────────────────
+# 4. Yan Menü
+# ─────────────────────────────────────────────
+st.sidebar.header("🚚 Taşıma Parametreleri")
+arac_secimi = st.sidebar.selectbox("Araç Tipi", ["Hafif Kamyonet", "Orta Kamyon", "Ağır TIR"])
+yuk = st.sidebar.slider("Yük Miktarı (Ton)", 0.0, 30.0, 5.0)
 
-except Exception as e:
-    st.error(f"Sistem Hatası: {e}")
+arac_map = {"Hafif Kamyonet": 1, "Orta Kamyon": 2, "Ağır TIR": 3}
+
+# ─────────────────────────────────────────────
+# 5. Ana Panel — Rota Seçimi
+# ─────────────────────────────────────────────
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("📍 Rota Belirleme")
+    baslangic = st.selectbox("Başlangıç Noktası", mahalle_df['mahalle'].unique())
+    varis     = st.selectbox("Varış Noktası",     mahalle_df['mahalle'].unique())
+    mesafe    = st.number_input("Tahmini Mesafe (km)", min_value=0.1, value=5.0)
+
+# ─────────────────────────────────────────────
+# 6. Emisyon Hesaplama Yardımcı Fonksiyonu
+# ─────────────────────────────────────────────
+def hesapla_co2(mesafe_km, arac_tipi_str, yuk_ton, mahalle_bilgisi):
+    girdi = np.array([[
+        mesafe_km,
+        1 if arac_tipi_str == "Ağır TIR" else 0,
+        arac_map[arac_tipi_str],
+        mahalle_bilgisi['yol_egimi'],
+        yuk_ton,
+        0.5
+    ]])
+    return model.predict(girdi)[0]
+
+# ─────────────────────────────────────────────
+# 7. Harita Renk Yardımcısı
+# ─────────────────────────────────────────────
+ROTA_ETIKETLERI = ["En Az Emisyon 🌿", "Orta Emisyon 🟡", "En Fazla Emisyon 🔴"]
+
+def co2_rengi(co2_degeri, min_co2, max_co2):
+    if max_co2 == min_co2:
+        return "green"
+    oran = (co2_degeri - min_co2) / (max_co2 - min_co2)
+    if oran < 0.4:
+        return "green"
+    elif oran < 0.7:
+        return "orange"
+    return "red"
+
+# ─────────────────────────────────────────────
+# 8. Ana Buton — Analiz + Harita
+# ─────────────────────────────────────────────
+if st.button("🚀 Emisyon Analizini Çalıştır"):
+
+    mahalle_bilgisi = mahalle_df[mahalle_df['mahalle'] == baslangic].iloc[0]
+    varis_bilgisi   = mahalle_df[mahalle_df['mahalle'] == varis].iloc[0]
+
+    st.markdown("---")
+
+    # ── Mevcut hesaplama (değişmedi) ──────────
+    tahmin = hesapla_co2(mesafe, arac_secimi, yuk, mahalle_bilgisi)
+
+    res1, res2 = st.columns(2)
+    with res1:
+        st.metric(label="Tahmini Karbon Salınımı", value=f"{round(tahmin, 2)} kg CO2")
+        st.info(f"Seçilen Mahalle: {baslangic} | Eğim Zorluğu: {mahalle_bilgisi['yol_egimi']}")
+    with res2:
+        st.write("📊 Rota Verimlilik Analizi")
+        chart_data = pd.DataFrame({
+            'Senaryo': ['Senin Rotan', 'Toyota Yeşil Hedef'],
+            'Emisyon': [tahmin, tahmin * 0.85]
+        })
+        st.bar_chart(chart_data, x='Senaryo', y='Emisyon', color='#2ecc71')
+
+    # ── YENİ: Harita ve Alternatif Rotalar ────
+    st.markdown("---")
+    st.subheader("🗺️ Yeşil Rota Haritası")
+    st.caption("Alternatif rotalar emisyon değerine göre: 🟢 Az · 🟡 Orta · 🔴 Fazla")
+
+    try:
+        bas_koord = (mahalle_bilgisi['lon'], mahalle_bilgisi['lat'])
+        var_koord = (varis_bilgisi['lon'],   varis_bilgisi['lat'])
+
+        with st.spinner("Alternatif rotalar hesaplanıyor..."):
+            yanit = ors_client.directions(
+                coordinates=[bas_koord, var_koord],
+                profile='driving-hgv',
+                format='geojson',
+                alternative_routes={"share_factor": 0.6, "target_count": 3}
+            )
+
+        rotalar = yanit['features']
+
+        merkez_lat = (mahalle_bilgisi['lat'] + varis_bilgisi['lat']) / 2
+        merkez_lon = (mahalle_bilgisi['lon'] + varis_bilgisi['lon']) / 2
+        harita = folium.Map(location=[merkez_lat, merkez_lon], zoom_start=13,
+                            tiles="OpenStreetMap")
+
+        rota_co2_listesi = []
+        for rota in rotalar:
+            km  = rota['properties']['summary']['distance'] / 1000
+            co2 = hesapla_co2(km, arac_secimi, yuk, mahalle_bilgisi)
+            rota_co2_listesi.append((rota, km, co2))
+
+        rota_co2_listesi.sort(key=lambda x: x[2])
+
+        min_co2 = rota_co2_listesi[0][2]
+        max_co2 = rota_co2_listesi[-1][2]
+
+        for sira, (rota, km, co2) in enumerate(rota_co2_listesi):
+            koordinatlar = [(p[1], p[0]) for p in rota['geometry']['coordinates']]
+            renk  = co2_rengi(co2, min_co2, max_co2)
+            kalin = 7 if sira == 0 else 4
+
+            popup_html = f"""
+            <div style="font-family:sans-serif;min-width:160px">
+                <b>{ROTA_ETIKETLERI[min(sira,2)]}</b><br>
+                🛣️ Mesafe: <b>{km:.1f} km</b><br>
+                💨 CO₂: <b>{co2:.2f} kg</b><br>
+                {"⭐ <b>Önerilen rota</b>" if sira == 0 else ""}
+            </div>"""
+
+            folium.PolyLine(
+                koordinatlar, color=renk, weight=kalin, opacity=0.85,
+                tooltip=f"Rota {sira+1}: {co2:.1f} kg CO₂",
+                popup=folium.Popup(popup_html, max_width=220)
+            ).add_to(harita)
+
+        folium.Marker(
+            [mahalle_bilgisi['lat'], mahalle_bilgisi['lon']],
+            tooltip=f"🟢 Başlangıç: {baslangic}",
+            icon=folium.Icon(color='green', icon='play', prefix='fa')
+        ).add_to(harita)
+
+        folium.Marker(
+            [varis_bilgisi['lat'], varis_bilgisi['lon']],
+            tooltip=f"🔴 Varış: {varis}",
+            icon=folium.Icon(color='red', icon='flag', prefix='fa')
+        ).add_to(harita)
+
+        st_folium(harita, width=None, height=500, returned_objects=[])
+
+        # ── Özet Tablo ────────────────────────
+        st.subheader("📋 Rota Karşılaştırması")
+        tablo_verisi = []
+        for sira, (rota, km, co2) in enumerate(rota_co2_listesi):
+            sure_dk  = rota['properties']['summary']['duration'] / 60
+            tasarruf = rota_co2_listesi[-1][2] - co2
+            tablo_verisi.append({
+                "Sıra"         : f"Rota {sira+1}",
+                "Durum"        : ROTA_ETIKETLERI[min(sira, 2)],
+                "Mesafe (km)"  : f"{km:.1f}",
+                "Süre (dk)"    : f"{sure_dk:.0f}",
+                "CO₂ (kg)"     : f"{co2:.2f}",
+                "Tasarruf (kg)": f"{tasarruf:.2f}" if tasarruf > 0 else "—"
+            })
+
+        st.dataframe(pd.DataFrame(tablo_verisi), use_container_width=True, hide_index=True)
+
+        en_iyi_km  = rota_co2_listesi[0][1]
+        en_iyi_co2 = rota_co2_listesi[0][2]
+        tasarruf   = rota_co2_listesi[-1][2] - en_iyi_co2
+        st.success(
+            f"✅ Önerilen rota **{en_iyi_km:.1f} km** uzunluğunda, "
+            f"**{en_iyi_co2:.2f} kg CO₂** üretiyor. "
+            f"En kötü rotaya göre **{tasarruf:.2f} kg** daha az emisyon!"
+        )
+
+    except openrouteservice.exceptions.ApiError as hata:
+        st.error(f"ORS API hatası: {hata}")
+    except KeyError:
+        st.warning("CSV'de 'lat' ve 'lon' sütunları bulunamadı. Adım 4'e bakın.")
+
+# ─────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.write("Bilecik BİLSEM - 2026")
