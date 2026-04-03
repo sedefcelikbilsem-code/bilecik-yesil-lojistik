@@ -1,7 +1,8 @@
 streamlit
 pandas
-joblib
 numpy
+joblib
 folium
 streamlit-folium
 openrouteservice
+scikit-learn==1.3.2
