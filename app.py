@@ -110,7 +110,7 @@ if st.button("🚀 Emisyon Analizini Çalıştır"):
         with st.spinner("Alternatif rotalar hesaplanıyor..."):
             yanit = ors_client.directions(
                 coordinates=[bas_koord, var_koord],
-                profile='driving-hgv',
+                profile='driving-car',
                 format='geojson',
                 alternative_routes={"share_factor": 0.6, "target_count": 3}
             )
